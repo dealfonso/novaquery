@@ -72,6 +72,20 @@ def main():
         - command line to retrieve the names and id of VMs that have pci_passthrough devices, grouped by host name:
             novaquery flavor.extra_specs.pci_passthrough:alias -f name -f id -g OS-EXT-SRV-ATTR:host
 
+            {
+                "fh06": [
+                    {
+                        "name": "spotG01",
+                        "id": "3602d1c6-0fe1-4c89-9a68-2a63cbc6c04a",
+                        "flavor": {
+                            "extra_specs": {
+                                "pci_passthrough:alias": "V100:1"
+                            }
+                        },
+                        "OS-EXT-SRV-ATTR:host": "fh06"
+                    }
+                ]
+            }
     """
     parser = argparse.ArgumentParser(allow_abbrev=False, description=main.__doc__, formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("-n", "--no-add-searched", help="Do not add the searched fields to the output", default=True, action="store_false", dest="add_searched")
@@ -182,11 +196,14 @@ def main():
                         if value is None:
                             matches = True
                         else:
-                            matches = object_value == value
+                            if type(object_value) == type(value):
+                                matches = object_value == value
+                            else:
+                                matches = str(object_value) == str(value)
                             if (not matches) and args.starts_with:
-                                matches = str(object_value).startswith(value)
+                                matches = str(object_value).startswith(str(value))
                             if (not matches) and args.contains:
-                                matches = str(object_value).find(value) != -1
+                                matches = str(object_value).find(str(value)) != -1
 
                         if value_expression['negative']:
                             matches = not matches
