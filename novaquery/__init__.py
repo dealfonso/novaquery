@@ -21,7 +21,7 @@ from tqdm import tqdm
 import os
 from osidle.common import p_warning, p_info, p_error, p_debug, p_debugv, s_error
 from .version import VERSION
-
+from .cache import CacheFile
 
 def findInObject(obj, key):
     keys = key.split(".")
@@ -101,6 +101,7 @@ def main():
     parser.add_argument("-U", "--os-username", dest="username", help="OpenStack username (if not set, will be obtained using OS_USERNAME env var)", default=None)
     parser.add_argument("-P", "--os-password", dest="password", help="OpenStack password  (if not set, will be obtained using OS_PASSWORD env var)", default=None)
     parser.add_argument("-H", "--os-auth", dest="keystone", help="OpenStack keytsone authentication endpoint (if not set, will be obtained using OS_AUTH_URL env var)", default=None)
+    parser.add_argument("-X", "--clear-cache", help="Forces clearing the cache prior to querying OpenStack (cache is valid for 10 min.)", default=False, action="store_true", dest="clear_cache")
     parser.add_argument("-v", "--version", action='version', version=VERSION)
     parser.add_argument("searchfield", help="Field to search for in the server and the value that we want to match (e.g. flavor.extra_specs.pci_passthrough:alias=V100:1)")
     args = parser.parse_args()
@@ -140,6 +141,11 @@ def main():
 
     search_fields[searchfield[0]] = { "value": value, "negative": is_negative }
 
+    # Prepare the cache
+    cache = CacheFile.create("~/.novaquery/servers")
+    if args.clear_cache:
+        cache.clear()
+
     # If the user requested to add the searched fields, add them to the output
     if args.add_searched:
         for field in search_fields:
@@ -178,8 +184,11 @@ def main():
                 p_warning("Error: Could not find the link to the information from the server")
                 break
 
-            # Get the server information
-            server_info = oc.tokenQuery(token, server_link, headers={"X-OpenStack-Nova-API-Version": args.apiversion}, timeout=15)
+            server_info = cache.get(server_link)
+            if server_info is None:
+                # Get the server information
+                server_info = oc.tokenQuery(token, server_link, headers={"X-OpenStack-Nova-API-Version": args.apiversion}, timeout=15)
+                cache.add(server_link, server_info)
 
             if server_info is not None:
                 server_info = server_info['server']
