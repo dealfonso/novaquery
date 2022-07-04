@@ -103,7 +103,7 @@ def main():
     parser.add_argument("-H", "--os-auth", dest="keystone", help="OpenStack keytsone authentication endpoint (if not set, will be obtained using OS_AUTH_URL env var)", default=None)
     parser.add_argument("-X", "--clear-cache", help="Forces clearing the cache prior to querying OpenStack (cache is valid for 10 min.)", default=False, action="store_true", dest="clear_cache")
     parser.add_argument("-v", "--version", action='version', version=VERSION)
-    parser.add_argument("searchfield", help="Field to search for in the server and the value that we want to match (e.g. flavor.extra_specs.pci_passthrough:alias=V100:1)")
+    parser.add_argument("searchfield", help="Fields to search for in the server and the value that we want to match (e.g. flavor.extra_specs.pci_passthrough:alias=V100:1); if multiple query args are used, the behavior is 'or'",nargs="*")
     args = parser.parse_args()
 
     if args.username is not None:
@@ -130,16 +130,17 @@ def main():
     # Now get a dictionary with the fields to search for and the value to match { "path.to.value": "value", ... }
     search_fields = {}
 
-    searchfield = args.searchfield.split("=")
-    value = None
-    is_negative = False
-    if len(searchfield) > 1:
-        value = "=".join(searchfield[1:])
-        if searchfield[0][-1] == "!":
-            searchfield[0] = searchfield[0][:-1]
-            is_negative = True
+    for searchfield in args.searchfield:
+        searchfield = searchfield.split("=")
+        value = None
+        is_negative = False
+        if len(searchfield) > 1:
+            value = "=".join(searchfield[1:])
+            if searchfield[0][-1] == "!":
+                searchfield[0] = searchfield[0][:-1]
+                is_negative = True
 
-    search_fields[searchfield[0]] = { "value": value, "negative": is_negative }
+        search_fields[searchfield[0]] = { "value": value, "negative": is_negative }
 
     # Prepare the cache
     cache = CacheFile.create("~/.novaquery/servers")
@@ -160,6 +161,10 @@ def main():
     if not token.get():
         p_error("Unable to get the token. Please check the credentials.")
         sys.exit(1)
+
+    # If no fields are requested, we interpret that we are requesting the fields used to search
+    if len(args.fields) == 0:
+        args.all_fields = True
 
     servers = oc.tokenQuery(token, "/servers" + ("?all_tenants=1" if args.all_tenants else ""))
 
@@ -193,38 +198,47 @@ def main():
             if server_info is not None:
                 server_info = server_info['server']
 
-                for field, value_expression in search_fields.items():
-                    object_value = findInObject(server_info, field)
+                if len(search_fields) > 0:
+                    for field, value_expression in search_fields.items():
+                        object_value = findInObject(server_info, field)
 
-                    value = value_expression['value']
-                    # If the object has a value in the searched field, check if it matches the value
-                    if object_value is not None:
-                        matches = False
+                        value = value_expression['value']
+                        # If the object has a value in the searched field, check if it matches the value
+                        if object_value is not None:
+                            matches = False
 
-                        # If the user did not request a value, we match always                        
-                        if value is None:
-                            matches = True
-                        else:
-                            if type(object_value) == type(value):
-                                matches = object_value == value
+                            # If the user did not request a value, we match always                        
+                            if value is None:
+                                matches = True
                             else:
-                                matches = str(object_value) == str(value)
-                            if (not matches) and args.starts_with:
-                                matches = str(object_value).startswith(str(value))
-                            if (not matches) and args.contains:
-                                matches = str(object_value).find(str(value)) != -1
+                                if type(object_value) == type(value):
+                                    matches = object_value == value
+                                else:
+                                    matches = str(object_value) == str(value)
+                                if (not matches) and args.starts_with:
+                                    matches = str(object_value).startswith(str(value))
+                                if (not matches) and args.contains:
+                                    matches = str(object_value).find(str(value)) != -1
 
-                        if value_expression['negative']:
-                            matches = not matches
+                            if value_expression['negative']:
+                                matches = not matches
 
-                        # If matches, store the requested fields
-                        if matches:
-                            if args.all_fields:
-                                current_object = server_info
-                            else:
-                                for field in args.fields:
-                                    v = findInObject(server_info, field)
-                                    copyToObject(current_object, server_info, field)
+                            # If matches, store the requested fields
+                            if matches:
+                                if args.all_fields:
+                                    current_object = server_info
+                                else:
+                                    for field in args.fields:
+                                        v = findInObject(server_info, field)
+                                        copyToObject(current_object, server_info, field)
+                else:
+                    # If there are no search fields, it will understand that we want any object
+                    if args.all_fields:
+                        current_object = server_info
+                    else:
+                        for field in args.fields:
+                            v = findInObject(server_info, field)
+                            copyToObject(current_object, server_info, field)
 
             # Finally store the object
             if len(current_object.keys()) > 0:
