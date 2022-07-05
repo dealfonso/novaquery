@@ -25,8 +25,19 @@ class CacheData:
         self._entries = {}
 
     @property
+    def keys(self) -> list:
+        """Returns the keys of the cache entries
+
+        Returns:
+            list: list of keys in the cache
+        """
+        return list(self._entries.keys())
+
+    @property
     def validity(self) -> float:
         """Retrieves the validity of the items in the cache
+
+        * if validity is negative, the items are never expired
 
         Returns:
             float: validity of the cache entries, in seconds
@@ -36,6 +47,8 @@ class CacheData:
     @validity.setter
     def validity(self, validity: float) -> None:
         """Sets the global validity for the entries in the cache
+
+        * if validity is negative, the items are never expired
 
         Args:
             validity (float): validity of the cache entries, in seconds
@@ -59,7 +72,6 @@ class CacheData:
         """
         self._entries[key] = {
             "data": data,
-            "key": key,
             "t": time.time()
         }
         return True
@@ -79,7 +91,7 @@ class CacheData:
             entry = self._entries[key]
             if validity is None:
                 validity = self.validity
-            if time.time() - entry["t"] < validity:
+            if (validity < 0) or (time.time() - entry["t"] < validity):
                 return entry["data"]
         return None
 

@@ -23,6 +23,20 @@ from osidle.common import p_warning, p_info, p_error, p_debug, p_debugv, s_error
 from .version import VERSION
 from .cache import CacheFile
 
+def convert_lists_of_object(obj):
+    if isinstance(obj, dict):
+        listable = True
+        try:
+            [ int(k) for k, v in obj.items() ]
+        except:
+            listable = False
+        if listable:
+            obj = [ convert_lists_of_object(v) for k, v in obj.items() ]
+        else:
+            for k, v in obj.items():
+                obj[k] = convert_lists_of_object(v)
+    return obj
+
 def findInObject(obj, key):
     keys = key.split(".")
     if keys[0] in obj:
@@ -31,6 +45,16 @@ def findInObject(obj, key):
         else:
             return findInObject(obj[keys[0]], ".".join(keys[1:]))
     else:
+        if isinstance(obj, list):
+            try:
+                keys[0] = int(keys[0])
+            except:
+                return None
+            if keys[0] < len(obj):
+                if len(keys) == 1:
+                    return obj[keys[0]]
+                else:
+                    return findInObject(obj[keys[0]], ".".join(keys[1:]))
         return None
 
 def copyToObject(dst, src, key):
@@ -42,7 +66,18 @@ def copyToObject(dst, src, key):
         else:
             if keys[0] not in dst:
                 dst[keys[0]] = {}
-            copyToObject(dst[keys[0]], src[keys[0]], ".".join(keys[1:]))
+            if isinstance(src, list):
+                try:
+                    # Why we do in this way: because the key may be an integer for the list, but in the destination
+                    #   maybe we do not want to copy all the keys even if they are integers. So we safely transform
+                    #   the list into a dictionary whose keys are the string of the integer.
+                    nkey0 = int(keys[0])
+                    copyToObject(dst[keys[0]], src[nkey0], ".".join(keys[1:]))
+                except Exception as e:
+                    # Do not know what to do with this
+                    pass
+            else:
+                copyToObject(dst[keys[0]], src[keys[0]], ".".join(keys[1:]))
 
 def json2keys(obj, prefix = ""):
     # TODO: return to string
@@ -102,6 +137,8 @@ def main():
     parser.add_argument("-P", "--os-password", dest="password", help="OpenStack password  (if not set, will be obtained using OS_PASSWORD env var)", default=None)
     parser.add_argument("-H", "--os-auth", dest="keystone", help="OpenStack keytsone authentication endpoint (if not set, will be obtained using OS_AUTH_URL env var)", default=None)
     parser.add_argument("-X", "--clear-cache", help="Forces clearing the cache prior to querying OpenStack (cache is valid for 10 min.)", default=False, action="store_true", dest="clear_cache")
+    parser.add_argument("-O", "--cache-only", help="Use only the data in the cache", default=False, action="store_true", dest="cache_only")
+    parser.add_argument("-k", "--no-convert-dict-to-list", help="Do not try to convert dictionaries of resulting objects to lists, even if they have all numeric keys", default=False, dest="keep_dicts", action="store_true")
     parser.add_argument("-v", "--version", action='version', version=VERSION)
     parser.add_argument("searchfield", help="Fields to search for in the server and the value that we want to match (e.g. flavor.extra_specs.pci_passthrough:alias=V100:1); if multiple query args are used, the behavior is 'or'",nargs="*")
     args = parser.parse_args()
@@ -144,6 +181,8 @@ def main():
 
     # Prepare the cache
     cache = CacheFile.create("~/.novaquery/servers")
+    if args.cache_only:
+        cache.validity = -1
     if args.clear_cache:
         cache.clear()
 
@@ -152,21 +191,32 @@ def main():
         for field in search_fields:
             args.fields.append(field)
 
-    # Must add the group field to the output fields
-    if args.group_field is not None:
-        args.fields.append(args.group_field)
-
-    # Let's begin by retrieving the list of servers
-    token = oc.Token()
-    if not token.get():
-        p_error("Unable to get the token. Please check the credentials.")
-        sys.exit(1)
-
     # If no fields are requested, we interpret that we are requesting the fields used to search
     if len(args.fields) == 0:
         args.all_fields = True
 
-    servers = oc.tokenQuery(token, "/servers" + ("?all_tenants=1" if args.all_tenants else ""))
+    # Must add the group field to the output fields
+    group_added = False
+    if (args.group_field is not None) and (not args.all_fields):
+        # Let's check whether the group field is a subfield of a field (in that case we'll not add it because it adds hidden complexity)
+        containers = list(filter(lambda x: args.group_field.find(f"{x}.") == 0, args.fields))
+        if len(containers) == 0:
+            args.fields.append(args.group_field)
+            group_added = True
+
+    if args.cache_only:
+        # Build a fake server list with the servers in the cache
+        servers = {
+            'servers': [ {'links':[{'rel': 'self', 'href': url}]} for url in cache.keys ]
+        }
+    else:
+        # Let's begin by retrieving the list of servers
+        token = oc.Token()
+        if not token.get():
+            p_error("Unable to get the token. Please check the credentials.")
+            sys.exit(1)
+
+        servers = oc.tokenQuery(token, "/servers" + ("?all_tenants=1" if args.all_tenants else ""))
 
     if servers is not None:
         # The list of objects retrieved
@@ -198,6 +248,9 @@ def main():
             if server_info is not None:
                 server_info = server_info['server']
 
+                # At first, the object does not match the search fields
+                matches = False
+
                 if len(search_fields) > 0:
                     for field, value_expression in search_fields.items():
                         object_value = findInObject(server_info, field)
@@ -205,7 +258,6 @@ def main():
                         value = value_expression['value']
                         # If the object has a value in the searched field, check if it matches the value
                         if object_value is not None:
-                            matches = False
 
                             # If the user did not request a value, we match always                        
                             if value is None:
@@ -225,24 +277,19 @@ def main():
 
                             # If matches, store the requested fields
                             if matches:
-                                if args.all_fields:
-                                    current_object = server_info
-                                else:
-                                    for field in args.fields:
-                                        v = findInObject(server_info, field)
-                                        copyToObject(current_object, server_info, field)
+                                break
                 else:
+                    matches = True
+                
+                if matches:
                     # If there are no search fields, it will understand that we want any object
                     if args.all_fields:
                         current_object = server_info
                     else:
                         for field in args.fields:
-                            v = findInObject(server_info, field)
                             copyToObject(current_object, server_info, field)
 
-            # Finally store the object
-            if len(current_object.keys()) > 0:
-                objects_retrieved.append(current_object)
+                    objects_retrieved.append(current_object)
 
             if args.progress:
                 pbar.update(1)
@@ -252,7 +299,6 @@ def main():
 
     # Print the output
     if len(objects_retrieved) > 0:
-
         if args.group_field is not None:
             grouped = {}
             for object in objects_retrieved:
@@ -260,8 +306,14 @@ def main():
                 if v is not None:
                     if v not in grouped:
                         grouped[v] = []
+                    if not args.keep_dicts:
+                        object = convert_lists_of_object(object)
                     grouped[v].append(object)
             objects_retrieved = grouped
+        else:
+            # Finally store the object
+            if not args.keep_dicts:
+                objects_retrieved = [ convert_lists_of_object(o) for o in objects_retrieved ]
 
         if args.format == "json":
             print(json.dumps(objects_retrieved, indent=4))
